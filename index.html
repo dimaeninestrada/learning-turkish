@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kelime Kartları — Turkish Flashcards</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -453,6 +454,30 @@
     }
     .quiz-no-words .emoji { font-size: 3rem; margin-bottom: 12px; }
 
+    /* ── Category filter (words tab) ────────────────────── */
+    .cat-filter-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--gray50);
+      border: 1.5px solid var(--gray200);
+      border-radius: 10px;
+      padding: 0 14px;
+      margin-bottom: 16px;
+    }
+    .cat-filter-wrap span { color: var(--gray400); }
+    .cat-filter-wrap select {
+      border: none;
+      background: transparent;
+      padding: 10px 0;
+      font-size: .9rem;
+      font-family: inherit;
+      color: var(--gray900);
+      width: 100%;
+      cursor: pointer;
+    }
+    .cat-filter-wrap select:focus { outline: none; }
+
     /* learn-new empty */
     .learn-done-banner {
       text-align: center;
@@ -546,6 +571,12 @@
         <span>🔍</span>
         <input type="text" id="search-inp" placeholder="Search words…" oninput="renderWordList()" />
       </div>
+      <div class="cat-filter-wrap">
+        <span>📂</span>
+        <select id="cat-filter" onchange="renderWordList()">
+          <option value="">Все категории</option>
+        </select>
+      </div>
       <div id="word-count" class="word-count"></div>
       <div id="word-list" class="word-list"></div>
     </div>
@@ -589,6 +620,10 @@
             <option value="random">Рандом</option>
             <option value="worst">Сложные первые</option>
             <option value="newest">Новые первые</option>
+          </select>
+          <label style="margin-left:8px">Группа:</label>
+          <select id="quiz-group" onchange="startQuiz()">
+            <option value="">Все группы</option>
           </select>
           <button class="btn btn-ghost btn-sm" onclick="startQuiz()" style="margin-left:auto">↺ Заново</button>
         </div>
@@ -643,6 +678,10 @@
 </main>
 
 <script>
+// ── Telegram Mini App init ─────────────────────────────
+window.Telegram?.WebApp?.ready();
+window.Telegram?.WebApp?.expand();
+
 // ── Categories ─────────────────────────────────────────
 const CATEGORIES = {
   greeting:    '🤝 Приветствия',
@@ -917,6 +956,7 @@ function addWord(e) {
   document.getElementById('inp-cat').value = 'other';
   document.getElementById('inp-tr').focus();
   showMsg('add-msg', `«${tr}» добавлено!`, 'success');
+  populateCatFilter();
   renderWordList();
 }
 
@@ -962,15 +1002,17 @@ function toggleCat(cat) {
 function renderWordList() {
   const words  = loadWords();
   const query  = document.getElementById('search-inp').value.trim().toLowerCase();
+  const catFilter = document.getElementById('cat-filter').value;
   const base = difficultFilterOn
     ? words.filter(isDifficult).sort((a, b) => (b.incorrect - b.correct) - (a.incorrect - a.correct))
     : words;
+  const baseCat = catFilter ? base.filter(w => getCat(w) === catFilter) : base;
   const filtered = query
-    ? base.filter(w =>
+    ? baseCat.filter(w =>
         w.tr.toLowerCase().includes(query) ||
         w.en.toLowerCase().includes(query) ||
         (w.notes||'').toLowerCase().includes(query))
-    : base;
+    : baseCat;
 
   const newCount     = words.filter(w => (w.status||'new') === 'new').length;
   const learnedCount = words.length - newCount;
@@ -991,8 +1033,8 @@ function renderWordList() {
     return;
   }
 
-  // Flat list when searching or difficult filter is on (to preserve sort order)
-  if (query || difficultFilterOn) {
+  // Flat list when searching, difficult filter, or category filter is active
+  if (query || difficultFilterOn || catFilter) {
     listEl.innerHTML = filtered.map(w => renderWordItem(w)).join('');
     return;
   }
@@ -1033,6 +1075,7 @@ function renderWordList() {
 
 function deleteWord(id) {
   saveWords(loadWords().filter(w => w.id !== id));
+  populateCatFilter();
   renderWordList();
 }
 
@@ -1129,17 +1172,45 @@ function startQuiz() {
   updateModeBadges();
   const allWords = loadWords();
 
-  const pool = quizMode === 'learn'
+  // Base pool by mode (no slice/sort for hard yet — applied after group filter)
+  let pool = quizMode === 'learn'
     ? allWords.filter(w => (w.status || 'new') === 'new')
     : quizMode === 'hard'
-      ? allWords
-          .filter(w => w.hardPinned || w.incorrect > 0)
-          .sort((a, b) => {
-            if (a.hardPinned !== b.hardPinned) return a.hardPinned ? -1 : 1;
-            return (b.incorrect - b.correct) - (a.incorrect - a.correct);
-          })
-          .slice(0, 30)
+      ? allWords.filter(w => w.hardPinned || w.incorrect > 0)
       : allWords;
+
+  // Populate quiz-group select from this mode's base pool
+  const grpSel = document.getElementById('quiz-group');
+  const prevGrp = grpSel.value;
+  grpSel.innerHTML = '<option value="">Все группы</option>';
+  const catCounts = {};
+  pool.forEach(w => { const c = getCat(w); catCounts[c] = (catCounts[c] || 0) + 1; });
+  const catOrd = Object.keys(CATEGORIES);
+  Object.keys(catCounts)
+    .sort((a, b) => {
+      const ia = catOrd.indexOf(a), ib = catOrd.indexOf(b);
+      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
+    })
+    .forEach(cat => {
+      const o = document.createElement('option');
+      o.value = cat;
+      o.textContent = (CATEGORIES[cat] || cat) + ' · ' + catCounts[cat];
+      grpSel.appendChild(o);
+    });
+  if ([...grpSel.options].some(o => o.value === prevGrp)) grpSel.value = prevGrp;
+
+  // Apply group filter
+  if (grpSel.value) pool = pool.filter(w => getCat(w) === grpSel.value);
+
+  // For hard mode: sort by difficulty then cap at 30 (after group filter)
+  if (quizMode === 'hard') {
+    pool = pool
+      .sort((a, b) => {
+        if (a.hardPinned !== b.hardPinned) return a.hardPinned ? -1 : 1;
+        return (b.incorrect - b.correct) - (a.incorrect - a.correct);
+      })
+      .slice(0, 30);
+  }
 
   // Empty pool banners
   if (pool.length === 0) {
@@ -2105,7 +2176,26 @@ const SEED_WORDS_4 = [
   localStorage.setItem(SEED_KEY_4, '1');
 })();
 
+// ── Populate category filter (words tab) ───────────────
+function populateCatFilter() {
+  const sel = document.getElementById('cat-filter');
+  const val = sel.value;
+  sel.innerHTML = '<option value="">Все категории</option>';
+  const words = loadWords();
+  const usedCats = new Set(words.map(w => getCat(w)));
+  const catOrd = Object.keys(CATEGORIES);
+  catOrd.filter(k => usedCats.has(k)).forEach(key => {
+    const count = words.filter(w => getCat(w) === key).length;
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = CATEGORIES[key] + ' · ' + count;
+    sel.appendChild(o);
+  });
+  if ([...sel.options].some(o => o.value === val)) sel.value = val;
+}
+
 // ── Boot ───────────────────────────────────────────────
+populateCatFilter();
 renderWordList();
 </script>
 </body>
